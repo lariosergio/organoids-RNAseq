@@ -1,0 +1,562 @@
+---
+title: "ORGANOIDS_1, Results Project CIBER-132_mRNAseq (TEST x12libraries)"
+author: "Sergio Lario"
+date: "2023-03-21"
+output:
+  html_document:
+    fig_caption: yes
+    toc: yes
+    theme: united
+    number_sections: yes
+    df_print: kable
+    toc_float: yes
+  pdf_document:
+    toc: yes
+header-includes: \usepackage{float} \usepackage{caption}
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.pos = 'H')
+opts_chunk$set(message = FALSE, cache=TRUE, cache.lazy = FALSE)
+opts_chunk$set(echo = TRUE)
+```
+
+```{r LIBRERIAS, echo=FALSE}
+if (!require("BiocManager", quietly = TRUE))
+     install.packages("BiocManager")
+#BiocManager::install("DESeq2")
+#BiocManager::install("biomaRt")
+#BiocManager::install("GenomicFeatures")
+#install.packages("pheatmap")
+#install.packages("ggExtra")
+#install.packages("ggpubr")
+
+library("ggplot2")
+library("DESeq2")
+library("dplyr")
+library("pheatmap")
+library("RColorBrewer")
+library("magrittr")
+library("dendextend")
+library("gridExtra")
+library("reshape2")
+library("ggdist")#para rainplot
+library("biomaRt")
+library("GenomicFeatures")
+library("ggExtra") #para histogramas a los lados de ggplot
+library("ggpubr") #para ggarrange
+library("kableExtra")
+```
+
+# Importar
+
+**Carpetas de trabajo**
+
+```{r CARPETAS, echo=FALSE}
+workingDir <- getwd()
+if(!dir.exists("datos")) dir.create("datos")
+dataDir <-file.path(workingDir, "datos")
+if(!dir.exists("results")) dir.create("results")
+resultsDir <- file.path(workingDir,"results")
+head(dir(path = dataDir), n=10L)
+```
+
+**Importo la table count que ha generado Juanjo con `Salmon` y `RSEM`:**
+
+```{r IMPORTAR_CUENTAS}
+hash_table_rnaseq1<- read.csv(
+  paste0(dataDir,"/hash_table_rnaseq_sl_14_03_2023.tsv"),
+  sep="\t", header=TRUE)
+dim(hash_table_rnaseq1)
+head(hash_table_rnaseq1[1:5,c(7:18)])
+countDataOrg1<- hash_table_rnaseq1[,7:18]
+```
+**Importo los factores de la muestras:**
+
+```{r IMPORTAR_METADATA}
+metaDataOrg1<-read.csv(
+  paste0(dataDir,"/metadata_organoids1.csv"),
+  sep=";", header=TRUE)
+#str(metaDataOrg1)
+metaDataOrg1$type<-as.factor(metaDataOrg1$type)
+metaDataOrg1$Metaplasia <- as.factor(metaDataOrg1$Metaplasia)
+metaDataOrg1$ribosomicos<- as.factor(metaDataOrg1$ribosomicos)
+#str(metaDataOrg1)
+knitr::kable(metaDataOrg1[, c(7,1,2,5)], align = "c", booktabs = T)%>%
+      kable_styling()%>%
+      add_footnote("Type: 0-organoide; 1-biopsia. ", notation="alphabet")%>%
+      add_footnote("Ribosomicos: 0-18s; 1-18s28s. ", notation="alphabet")
+```
+
+
+# Filtrado
+**Filtro los genes con reads >10 en la mitad de las muestras. El resultado del filtrado es el siguiente:**
+
+```{r FILTRADO}
+#datos<- melt(data.frame(assay(dseq_org1)+1))
+datos<- melt(data.frame(countDataOrg1)+1)
+colnames(datos)<-c("muestra","value")
+```
+
+
+```{r FILTRADO2, echo=FALSE}
+plot1<- ggplot(datos, aes(x= muestra, y= log2(value)))+
+  stat_halfeye(aes(fill= muestra),width=0.7, adjust= 0.5, justification= -0.1 )+
+  geom_boxplot(aes(fill= muestra), width=0.25, alpha= 0.5)+
+  theme(legend.key.size = unit(0.2, "cm"))+
+  theme(legend.key.size = unit(0.2, "cm"), aspect.ratio = 0.6)+
+  labs(title = "sin filtrar")
+
+#keep<- rowSums(counts(dseq_org1) > 10) >= 6
+keep<- rowSums(countDataOrg1 > 10) >= 6
+countDataOrg1<-countDataOrg1[keep,]
+#dseq_org1<-dseq_org1[keep,]
+#dim(dseq_org1)
+dim(countDataOrg1)
+hash_table_Filt<- hash_table_rnaseq1[keep,]
+
+#datos<- melt(data.frame(assay(dseq_org1)+1))
+datos<- melt(data.frame(countDataOrg1)+1)
+colnames(datos)<-c("muestra","value")
+plot2<- ggplot(datos, aes(x= muestra, y= log2(value)))+
+  stat_halfeye(aes(fill= muestra),width=0.7, adjust= 0.5, justification= -0.1 )+
+  geom_boxplot(aes(fill= muestra), width=0.25, alpha= 0.5)+
+  theme(legend.key.size = unit(0.2, "cm"), aspect.ratio = 0.6)+
+  labs(title = "filtrados (>10 counts y >6 muestras)")
+
+plot1
+plot2
+rm(plot1, plot2, keep)
+```
+
+**Parece que todas las muestras siguen una distribución similar en los boxplots.**
+
+# Longitud de los tránscritos:
+
+**La idea es determinar si hay diferencias de los reads (expresión) de las muestras que tienen 18s o 18s28s en función de la longitud de los tránscritos.**
+
+**El RNA 28s mide unos 5kb. Esperaríamos que, si el 28s realmente se ha perdido en la extracción (como parece mostrar el BA), aquellos genes de tamaño similar no se hayan secuenciado. Estos tránscritos los detectaríamos únicamente en aquellas muestras con ribosómicos intactos (18s28s)**
+
+##Obtener las longitudes de los transcritos
+**Obtengo las longitudes de los tráncritos de Ensembl. 
+
+https://rdrr.io/github/grimbough/biomaRt/f/vignettes/accessing_ensembl.Rmd
+
+```{r LONG_TRANSCRITOS, echo=FALSE}
+#listEnsembl()
+#ensembl <- useEnsembl(biomart = "genes")
+#datasets <- listDatasets(ensembl)
+#searchDatasets(mart = ensembl, pattern = "hsapiens")
+
+#recojo en una lista las ID de ensembl:
+ensembl_list <- hash_table_Filt$ensembl_gene_id
+
+#recopilo los atribrtos necesarios, el que més interesa es "transcript_length". 
+human <-useEnsembl(biomart= "ensembl", dataset="hsapiens_gene_ensembl")
+#listAttributes(human)
+
+#biomaRt::searchFilters(mart = human, pattern = "ensembl")
+genes_of_interest=getBM(attributes=c("hgnc_symbol","ensembl_gene_id","ensembl_gene_id_version","ensembl_transcript_id_version", "transcript_length", "transcript_is_canonical"), filters="ensembl_gene_id", values=ensembl_list, mart=human)
+#dim(genes_of_interest)
+#head(genes_of_interest)
+summary(genes_of_interest$transcript_length)
+
+#filtro los canonical
+genes_of_interest_filt<- filter(genes_of_interest, transcript_is_canonical == 1)
+
+dim(genes_of_interest_filt)
+#head(genes_of_interest_filt)
+
+# en hash_table ensembl names duplicados, algunos no contienen informcion sobre symbol, description, biotype...
+# otros se identifican con "PAR_Y_XXX". No sé que son, las elimino (solo para comprobación de reads vs longitud):
+duplicated_hash<-hash_table_Filt[duplicated(hash_table_Filt$ensembl_gene_id),]
+
+#head(duplicated_hash)
+table(is.na(duplicated_hash$gene_biotype))
+lista_borrar<- rownames(duplicated_hash)
+#dim(hash_table_Filt)
+hash_table_Filt<- hash_table_Filt[!(row.names(hash_table_Filt) %in% lista_borrar),]
+#summary(hash_table_Filt)
+dim(hash_table_Filt)
+head(hash_table_Filt)
+#ya no tiene duplicados de la variable ensembl_gene_id
+table(duplicated(hash_table_Filt$ensembl_gene_id))
+#creo una columna con los rownames (las identificaciones de Juanjo)
+hash_table_Filt$JuanjoRownames<- rownames(hash_table_Filt)
+```
+
+
+```{r MERGE, echo=FALSE}
+#uno las tablas hash_table_filt y genes_of_interest_filt
+a<-merge(hash_table_Filt, genes_of_interest_filt, by= "ensembl_gene_id", all.x= TRUE)
+#identical(a[['hgnc.symbol.x']],a[['hgnc.symbol.y']])
+#colnames(a)
+rownames(a)<- a$JuanjoRownames
+a<-a[,-c(19,20,24)]
+a<-a[,c(1:6,19:21,7:18)]
+names(a)[2]<- "hgnc_symbol"      
+#colnames(a)
+hash_table_Filt<-a
+rm(a)
+#str(hash_table_Filt)
+hash_table_Filt$entrezgene_id<- as.character(hash_table_Filt$entrezgene_id) 
+#la dataframe con las longitudes de los transcritos queda así:
+summary(hash_table_Filt)
+```
+
+```{r echo=FALSE}
+#queda un gen con NAs. Por eso aparece un warning, es el siguiente:
+hash_table_Filt[is.na(hash_table_Filt$transcript_length),]
+#lo quito
+hash_table_Filt<- hash_table_Filt[which(!is.na(hash_table_Filt$transcript_length)),]
+dim(hash_table_Filt)
+```
+
+
+## Distribución de la longitud de los transcritos:
+
+**La gráfica muestra la distribución de tamaños de los 14.000 tránscritos humanos canonical. (solo se ha hecho para los canonical, los prototípicos).**
+**El 75% de los tráncritos tiene un tamaño menor de 4950pb".**
+
+
+```{r PLOT_LONGITUD, echo=FALSE}
+#distribución de la longitud de los trasncritos:
+ggplot(hash_table_Filt, aes(y= log10(transcript_length)))+
+  stat_halfeye(fill="lightgreen", width=0.7, adjust= 0.5, justification= -0.1 )+
+  geom_boxplot(width=0.25, alpha= 0.5)+
+  theme(legend.key.size = unit(0.2, "cm"), aspect.ratio = 0.6)+
+  labs(title = "Transcript lengths")
+
+summary(hash_table_Filt$transcript_length)
+#queda un gen con NAs. Por eso aparece un warning, es el siguiente:
+hash_table_Filt[is.na(hash_table_Filt$transcript_length),]
+# dseq_org1<- DESeq(dseq_org1)
+# summary(results(dseq_org1))
+```
+
+## Reads vs longitud transcrito
+
+**Gráficos de dispersión de las reads (expresión) en función de la longitud de los tránscritos para cada una de las muestras. Parecen muy similares.**
+
+```{r echo=FALSE}
+scatter_plot <- function(data, x, y, title, ribosomico, grupo) {
+  letra<-substr(title,4,4)
+  tipo<- if_else(letra == "T", "biopsy", "organoid")
+  ribosomico<-if_else(ribosomico == 1, "18s", "18s28s")
+  #print(type, ribosomico)
+  p<- ggplot(data, aes(log2({{x}}), log2({{y}}+1))) +
+    geom_point(alpha= 0.05, color= "blue", na.rm = TRUE)+
+    labs(title= paste({{title}}, tipo, ribosomico, grupo),
+         y= "log2(counts)")+
+    ylim(-1, 20)+
+    theme_bw()
+  p<-ggMarginal(p, type = "histogram", fill= "lightblue")
+  #p<-print(p)
+  #p
+  #ggsave(p, path = resultsDir, filename = paste0("/",title,"_plot.jpeg"), device= "jpeg")
+  return(p)
+  
+}
+mis_plots<- list()
+
+muestras<- colnames(hash_table_Filt[c(10:21)])
+
+for (i in muestras) {
+  fila<-which(metaDataOrg1$name == i)
+  ribosomico<-as.numeric(metaDataOrg1[fila,5])
+  grupo<-metaDataOrg1[fila,4]
+  plot<- scatter_plot(data= hash_table_Filt,
+                      x= transcript_length,
+                      y= eval(parse(text = i)),
+                      title= i,
+                      ribosomico= ribosomico,
+                      grupo= grupo)
+  mis_plots[[i]]<-plot
+}
+```
+
+
+```{r echo=FALSE, fig.height=14, fig.width=7}
+ggarrange(mis_plots[[1]], mis_plots[[2]], mis_plots[[3]], mis_plots[[4]],
+                      ncol = 1, nrow = 4)
+ggarrange(mis_plots[[5]], mis_plots[[6]], mis_plots[[7]], mis_plots[[8]],
+                      ncol = 1, nrow = 4)
+ggarrange(mis_plots[[9]], mis_plots[[10]], mis_plots[[11]], mis_plots[[12]],
+                      ncol = 1, nrow = 4)
+rm(mis_plots)
+```
+
+## Expresión longitud transcrito agrupado por tamaños
+
+**A continuación se muestran las reads (expresión) en función del tamaño de los tránscritos, pero en esta ocasión en intervalos de longitud del tránscrito (intervalos de 1000 en 1000).**
+
+
+```{r echo=FALSE}
+library(reshape2)
+datos<- hash_table_Filt[, 9:21]
+datos$transcript<- rownames(datos)
+head(datos)
+#datos=t(datos)
+datos$quartil<- factor(cut(datos$transcript_length,
+                   quantile(datos$transcript_length, probs= c(0,seq(0.1,1, by=0.1))),
+                   include.lowest=TRUE,labels=FALSE))
+table(datos$quartil)
+summary(datos)
+datos<-melt(datos, measure.vars = c(muestras))
+datos$value<-log2(datos$value+1)
+names(datos)[5]<- "log2counts"
+datos$ribosomicos<-metaDataOrg1[match(datos$variable,metaDataOrg1$name),5]
+datos$ribosomicos<- ifelse(datos$ribosomicos == 0, "18s", "18s28s")
+table(datos$variable, datos$ribosomicos)
+
+datos<- datos %>% mutate(points_bin = cut(transcript_length, 
+                                          breaks=c(0, 3000, 4000, 5000,6000,7000,
+                                                   8000,9000,10000,150000, 25000,
+                                                   50000, 75000, 100000)))
+datos$tipo<- if_else(substr(datos$variable,4,4) == "T", "biopsy", "organoid")
+datos$combiTypeRibo<- paste0(datos$tipo,"_", datos$ribosomicos)
+```
+
+**La primera gráfica muestra que las biopsias (que son todas 18s) tienen iguales niveles de expresión que los organoides (que algunos son 18s y otros 18s28s) para los genes hasta 5000bp pero después las biopsias presentan niveles ligeramente mayores de expresión.**
+
+
+```{r echo=FALSE}
+ggplot(datos, aes(x=points_bin , y= log2counts, fill= tipo))+
+geom_boxplot()+ theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+                      legend.position="bottom")
+```
+
+**Se puede comprobar en la siguiente gráfica. Las muestras 18s tienen niveles de expresión similares a los 18s28s en los tránscritos hasta 5000bp. Para tamaños mayores, los 18s28s presentan menos expresión.**
+
+```{r echo=FALSE}
+ggplot(datos, aes(x=points_bin , y= log2counts, fill= ribosomicos))+
+geom_boxplot()+ theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+                      legend.position="bottom")
+```
+
+**Al hacer la combinación tipo x ribosómico vemos que los que mayor expresión presentan son las biopsias 18s, seguidas de los organoides 18s y por último los organoides 18s28s.**
+**Las diferencias no parecen muy grandes hasta llegar a los tránscritos grandes (>10.000bp).**
+
+```{r echo=FALSE}
+ggplot(datos, aes(x=points_bin , y= log2counts, fill= combiTypeRibo))+
+geom_boxplot()+
+  labs(x= "intervalos longitud tráncritos (pb)")+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+        legend.position="bottom")
+```
+
+**Si clasificamos la longitud de los tráncritos por deciles, vemos que los 18s y 18s28s son equivalentes hasta el decil 9 (5519-7296pb) y el 10 (7299-109224pb).**
+
+
+```{r echo=FALSE}
+ggplot(datos, aes(x= quartil, y= log2counts, color= ribosomicos))+
+geom_boxplot()+
+  labs(x= "deciles de longitud tráncrito")+
+  theme(legend.position="bottom")
+
+q9<- datos[which(datos$quartil==9 & datos$variable=="T07A"),1]
+summary(q9)
+
+q10<- datos[which(datos$quartil==10 & datos$variable=="T07A"),1]
+summary(q10)
+rm(datos)
+```
+
+# Número genes detectados
+
+**Se muestran el número de genes con más de 10 reads por muestra, la primera gráfica los colores indican el tipo de muestra (organoide y biopsia) y la segunda indican los riboómicos (18s o 18s28s).**
+**No podemos separar el efecto de la extracción de el del tipo de muestra. De nuevo se ve que el número de genes detectados es mayor en las biopsias (gráfica superior), aún siendo todas ellas del tipo 18s. Los organoides expresan menos genes, sean 18s o 18s28s.**
+**Los números, sin embargo, son muy similares.**
+
+```{r echo=FALSE}
+numero<-table(hash_table_Filt$T07A>10)[2]
+numero<- c(numero,table(hash_table_Filt$T09A>10)[2])
+numero<- c(numero,table(hash_table_Filt$T13A>10)[2])
+numero<- c(numero,table(hash_table_Filt$T18A>10)[2])
+numero<- c(numero,table(hash_table_Filt$T29T>10)[2])
+numero<- c(numero,table(hash_table_Filt$T34T>10)[2])
+numero<- c(numero,table(hash_table_Filt$T43A>10)[2])
+numero<- c(numero,table(hash_table_Filt$T44T>10)[2])
+numero<- c(numero,table(hash_table_Filt$T45A>10)[2])
+numero<- c(numero,table(hash_table_Filt$T46T>10)[2])
+numero<- c(numero,table(hash_table_Filt$T47A>10)[2])
+numero<- c(numero,table(hash_table_Filt$T48T>10)[2])
+
+NumGenes<- data.frame(suma= colSums(hash_table_Filt[10:21]))
+NumGenes$num_10<-numero
+NumGenes$muestra<- rownames(NumGenes)
+NumGenes$type<- metaDataOrg1$type
+NumGenes$ribo<- metaDataOrg1$ribosomicos
+NumGenes$type<- factor(NumGenes$type, labels=c("Organoide", "Biopsia"))
+NumGenes$ribo<- factor(NumGenes$ribo, labels= c("18s","18s28s"))
+NumGenes$combiTipoRibo<- paste0(NumGenes$type,"_", NumGenes$ribo)
+dim (NumGenes)
+
+plot1<- ggplot(data=NumGenes, aes(x= muestra, y= num_10, color= type))+
+  geom_point(stat = "identity", size=3)+
+  geom_abline(aes(intercept= mean(NumGenes$num_10), slope= 0), 
+             linetype="dotted", linewidth= 1.5, color= "blue")+
+  ylim(10000,15000)+
+  ylab("Ngenes> 10 counts")
+
+plot2<- ggplot(data=NumGenes, aes(x= muestra, y= num_10 , color= ribo))+
+  geom_point(stat = "identity", size=3)+
+  geom_hline(yintercept = mean(NumGenes$num_10), 
+             linetype="dotted", linewidth= 1.5, color= "blue")+
+    ylim(10000,15000)+
+    ylab("Ngenes> 10 counts")
+grid.arrange(plot1,plot2)
+
+```
+
+**Al hacer la combinación tipo x ribosómico vemos que el grupo biopsia-18s es el que más genes expresa, seguido de organoide_18s y organoide_18s28s.**
+
+**Pienso que las muestras con ribosómicos 18s el RNA se fraccionó más durante la extracción, lo que ha hecho que se obtengan más genes y a mayor expresión.**
+
+```{r echo=FALSE}
+ggplot(data=NumGenes, aes(x= combiTipoRibo, y= num_10 , color= combiTipoRibo))+
+  #geom_point(stat = "identity", size=3)+
+  geom_hline(yintercept = mean(NumGenes$num_10), 
+             linetype="dotted", linewidth= 1.5, color= "blue")+
+  #  ylim(10000,15000)+
+    ylab("Ngenes> 10 counts")+
+    geom_jitter(size=3)
+
+```
+
+
+
+# objeto DESEQ
+
+**Siguiendo la siguiente viñeta:**
+https://bioconductor.org/packages/release/workflows/vignettes/rnaseqGene/inst/doc/rnaseqGene.html
+
+**Comprobar que los nombres de las columnas de `countDataOrg1` coinciden con los de las filas de `metaDataOrg1`:**
+
+
+```{r COMPROBACION}
+all.equal(colnames(countDataOrg1), rownames(metaDataOrg1))
+# no coinciden, los rownames están vacíos.
+rownames(metaDataOrg1)<- metaDataOrg1$name
+all.equal(colnames(countDataOrg1), rownames(metaDataOrg1))
+#  ahora sí
+```
+
+**Creo el objeto DESeq, me quedo con las columnas que contienen las 12 muestras, las filas tienen el nombre de los genes en formato ENSEMBL_GENESYMBOL.**
+**El diseño es: **
+              **~ribosomicos+type+Metaplasia**
+
+```{r OBJETO_DESEQ}
+#metaDataOrg1<-metaDataOrg1[,c(2,3,5)]
+
+dseq_org1<- DESeqDataSetFromMatrix(countData = round(hash_table_Filt[,10:21]), 
+                                   colData = metaDataOrg1,
+                                   design=~ribosomicos+type+Metaplasia)
+dim(dseq_org1)
+```
+
+**Estabilización de la varianza. se hace necesaria porque el PCA funciona mejor si la varianza es homogénea. En RNAseq, la varianza no es homogénea, tiende a aumentar al aumentar los niveles de expresión. (se podría hacer con log, pero funciona mucho mejor la 'variance stabilizing transformation (VST)'): **
+
+```{r}
+#este FALSE es para que NO tenga en cuenta el diseño ~ribosomicos+type+Metaplasia)
+vsd<- vst(dseq_org1, blind = FALSE)
+boxplot(log2(assay(vsd)),
+        ylab= expression('log'[2]~'read counts'),
+        las=2,
+        main="VST")
+
+sampleDists<- dist(t(assay(vsd)))
+#sampleDists
+sampleDistMatrix <- as.matrix( sampleDists )
+```
+
+## Heatmap
+
+**Con esto obtenemos el heatmap de las distancias entre muestras ajustando la vaianza con VST.**
+**Vemos dos clusters que identifican el `tipo`: las biopsias a la izquierda y los organoides a la derecha.**
+
+```{r echo=FALSE}
+rownames(sampleDistMatrix) <- paste(vsd$Metaplasia, vsd$ribosomicos, vsd$group, vsd$type, vsd$name, sep = " - " )
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors)
+h <- hclust(sampleDists)
+#plot(as.dendrogram(h))
+```
+
+## Dendrograma
+
+**Para verlo más claro, se muestra el dendrograma. Vemos que hay dos clusters, biopsias (rojo) y organoides (verde).**
+**Después se puede comprobar que la clasificación según los ribosómicos (18s o 18s28s) no se agrupan en dos clusters y están intercalados entre los organoides.**
+
+```{r echo=FALSE, fig.height=6, fig.width=8}
+# Set the plot margin: bottom, left, top & right
+par(mar = c(10, 3, 3, 4) + 0.1,
+        xpd = NA) # allow content to go into outer margin 
+
+plot(as.dendrogram(h))
+# Setup the color bar based on $am & $vs
+the_bars_type <- ifelse(as.numeric(as.character(metaDataOrg1$type)),"red", "green")
+#the_bars_meta <- ifelse(as.numeric(as.character(metaDataOrg1$Metaplasia)), "yellow", "blue")
+the_bars_ribo <- ifelse(as.numeric(as.character(metaDataOrg1$ribosomicos)), "yellow", "blue")
+
+the_bars <- cbind(the_bars_ribo, the_bars_type  )#, the_bars_meta)
+colored_bars(colors = the_bars, dend = as.dendrogram(h),  rowLabels = c("ribos", "type"))
+# Add the legend manually
+
+legend("topright", legend = c('Type: biop', 'Type: org',
+                              "ribos: 18s", "ribos: 18s28s"),
+                            pch = 15, pt.cex = 2, cex = 0.9, bty = 'n',
+       inset = c(-0.1, 0), # place outside
+       title = "Variables", 
+       col = c('red', 'green', "yellow", "blue"))
+
+```
+
+## PCA
+
+**A continuación se muestra el PCA.**
+
+### PCA tipo muestra
+
+**El PCA1 explica el 61% de la variabilidad. Al identificar con colores el tipo de muestra vemos que las biopsias (verde) están claramente separadas de los organoides (rojo). **
+
+```{r echo=FALSE}
+plotPCA(vsd, intgroup = c("type"))+
+  ggtitle("Factor: type")
+```
+
+
+**Si identificamos con colores los tipos de ribosómicos, vemos que los organoides con 18s (en verde) aparecen a la izquierda junto a los organoides con 18s28s (en rojo).**
+
+
+```{r echo=FALSE}
+plotPCA(vsd, intgroup = c("ribosomicos"))+
+  ggtitle("Factor: ribosómicos")#,"type", "group"))
+
+require("ggrepel")
+plotPCA(vsd, intgroup = c("type","ribosomicos"))+
+  ggtitle("Factor: ribosómicos y tipo")+#, "group"))+
+  geom_text_repel(aes(label=vsd$name))
+```
+
+# Conclusión:
+
+**Creo que bastante evidencia para afirmar que la pérdida del 28s en el perfil del BA no ha afectado a los resultados del RNA-seq.**
+```{r}
+plotCounts(dseq_org1, gene =  "ENSG00000102837.6_OLFM4", intgroup = c("type","Metaplasia"))
+plotCounts(dseq_org1, gene =  "ENSG00000127831.10_VIL1", intgroup = c("type","Metaplasia"))
+plotCounts(dseq_org1, gene =  "ENSG00000134193.14_REG4", intgroup = c("type","Metaplasia"))
+plotCounts(dseq_org1, gene =  "ENSG00000122711.8_SPINK4", intgroup = c("type","Metaplasia"))
+plotCounts(dseq_org1, gene =  "ENSG00000184502.3_GAST", intgroup = c("type","Metaplasia"))
+plotCounts(dseq_org1, gene =  "ENSG00000134755.14_DSC2", intgroup = c("type","Metaplasia"))
+plotCounts(dseq_org1, gene =  "ENSG00000178462.11_TUBAL3", intgroup = c("type","Metaplasia"))
+plotCounts(dseq_org1, gene =  "ENSG00000131149.18_GSE1", intgroup = c("type","Metaplasia"))
+plotCounts(dseq_org1, gene =  "ENSG00000134333.13_LDHA", intgroup = c("type","Metaplasia"))
+```
+
