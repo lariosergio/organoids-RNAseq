@@ -1,7 +1,7 @@
 ---
-title: "ORGANOIDS_1, Results Project CIBER-132_mRNAseq (TEST x12libraries)"
+title: "ORGANOIDS_2, Results Project CIBER-132_mRNAseq (L13-L41)"
 author: "Sergio Lario"
-date: "2023-03-21"
+date: "2023-06-21"
 output:
   html_document:
     fig_caption: yes
@@ -66,25 +66,32 @@ head(dir(path = dataDir), n=10L)
 **Importo la table count que ha generado Juanjo con `Salmon` y `RSEM`:**
 
 ```{r IMPORTAR_CUENTAS}
-hash_table_rnaseq1<- read.csv(
-  paste0(dataDir,"/hash_table_rnaseq_sl_14_03_2023.tsv"),
+hash_table_rnaseq2<- read.csv(
+  paste0(dataDir,"/hash_table_rnaseq_sl_ciber132_23_06_2023.tsv"),
   sep="\t", header=TRUE)
-dim(hash_table_rnaseq1)
-head(hash_table_rnaseq1[1:5,c(7:18)])
-countDataOrg1<- hash_table_rnaseq1[,7:18]
+dim(hash_table_rnaseq2)
+head(hash_table_rnaseq2[1:5,c(7:35)])
+countDataOrg2<- hash_table_rnaseq2[,7:35]
 ```
 **Importo los factores de la muestras:**
 
 ```{r IMPORTAR_METADATA}
-metaDataOrg1<-read.csv(
-  paste0(dataDir,"/metadata_organoids1.csv"),
+metaDataOrg2<-read.csv(
+  paste0(dataDir,"/metadata_organoids2.csv"),
   sep=";", header=TRUE)
-#str(metaDataOrg1)
-metaDataOrg1$type<-as.factor(metaDataOrg1$type)
-metaDataOrg1$Metaplasia <- as.factor(metaDataOrg1$Metaplasia)
-metaDataOrg1$ribosomicos<- as.factor(metaDataOrg1$ribosomicos)
-#str(metaDataOrg1)
-knitr::kable(metaDataOrg1[, c(7,1,2,5)], align = "c", booktabs = T)%>%
+colnames(metaDataOrg2)[1]<- "name"
+
+#str(metaDataOrg2)
+metaDataOrg2$type<-factor(metaDataOrg2$type)
+metaDataOrg2$Metaplasia <- factor(metaDataOrg2$Metaplasia)
+metaDataOrg2$ribosomicos<- factor(metaDataOrg2$ribosomicos)
+metaDataOrg2$Origen_anat<- factor(metaDataOrg2$Origen_anat)
+metaDataOrg2$group<- factor(metaDataOrg2$group, levels=c ("DISPEPSIA","GASTRITIS", "METAPLASIA","ADENOK"))
+str(metaDataOrg2)
+#la dejo ordenada según el orden alfabético de las muestras
+metaDataOrg2 <- metaDataOrg2 %>% arrange(metaDataOrg2$name)
+
+knitr::kable(metaDataOrg2[, c(7,1,2,5)], align = "c", booktabs = T)%>%
       kable_styling()%>%
       add_footnote("Type: 0-organoide; 1-biopsia. ", notation="alphabet")%>%
       add_footnote("Ribosomicos: 0-18s; 1-18s28s. ", notation="alphabet")
@@ -96,7 +103,7 @@ knitr::kable(metaDataOrg1[, c(7,1,2,5)], align = "c", booktabs = T)%>%
 
 ```{r FILTRADO}
 #datos<- melt(data.frame(assay(dseq_org1)+1))
-datos<- melt(data.frame(countDataOrg1)+1)
+datos<- melt(data.frame(countDataOrg2)+1)
 colnames(datos)<-c("muestra","value")
 ```
 
@@ -109,16 +116,18 @@ plot1<- ggplot(datos, aes(x= muestra, y= log2(value)))+
   theme(legend.key.size = unit(0.2, "cm"), aspect.ratio = 0.6)+
   labs(title = "sin filtrar")
 
-#keep<- rowSums(counts(dseq_org1) > 10) >= 6
-keep<- rowSums(countDataOrg1 > 10) >= 6
-countDataOrg1<-countDataOrg1[keep,]
+#mantengo aquellos con más de 10 counts en más de la mitad de las muestras
+n_keep<- ceiling(dim(countDataOrg2)[2]/2)
+
+keep<- rowSums(countDataOrg2 > 10) >= n_keep
+countDataOrg2<-countDataOrg2[keep,]
 #dseq_org1<-dseq_org1[keep,]
 #dim(dseq_org1)
-dim(countDataOrg1)
-hash_table_Filt<- hash_table_rnaseq1[keep,]
+dim(countDataOrg2)
+hash_table_Filt<- hash_table_rnaseq2[keep,]
 
 #datos<- melt(data.frame(assay(dseq_org1)+1))
-datos<- melt(data.frame(countDataOrg1)+1)
+datos<- melt(data.frame(countDataOrg2)+1)
 colnames(datos)<-c("muestra","value")
 plot2<- ggplot(datos, aes(x= muestra, y= log2(value)))+
   stat_halfeye(aes(fill= muestra),width=0.7, adjust= 0.5, justification= -0.1 )+
@@ -145,26 +154,38 @@ rm(plot1, plot2, keep)
 https://rdrr.io/github/grimbough/biomaRt/f/vignettes/accessing_ensembl.Rmd
 
 ```{r LONG_TRANSCRITOS, echo=FALSE}
-#listEnsembl()
-#ensembl <- useEnsembl(biomart = "genes")
-#datasets <- listDatasets(ensembl)
-#searchDatasets(mart = ensembl, pattern = "hsapiens")
+# getBM tarda un tiempo en conseguir la información de los genes.
+# lo tengo guardado de runs anteriores, pero si no encontrara el archivo, volvería a ejecutarse.
 
+if (file.exists(paste0(dataDir, "/genes_of_interest.RData"))){
+    load(paste0(dataDir, "/genes_of_interest.RData"))
+}else{
 #recojo en una lista las ID de ensembl:
-ensembl_list <- hash_table_Filt$ensembl_gene_id
+    ensembl_list <- hash_table_Filt$ensembl_gene_id
+    
+    #recopilo los atribrtos necesarios, el que més interesa es "transcript_length". 
+    human <-useEnsembl(biomart= "ensembl", dataset="hsapiens_gene_ensembl")
+    #listAttributes(human)
+    
+    #biomaRt::searchFilters(mart = human, pattern = "ensembl")
+    genes_of_interest=getBM(attributes=c("hgnc_symbol","ensembl_gene_id","ensembl_gene_id_version",
+                                         "ensembl_transcript_id_version", "transcript_length",
+                                         "transcript_is_canonical"), 
+                                          filters="ensembl_gene_id", 
+                                          values=ensembl_list, mart=human)
+    save(genes_of_interest, file = paste0(dataDir, "/genes_of_interest.RData"))
+}
 
-#recopilo los atribrtos necesarios, el que més interesa es "transcript_length". 
-human <-useEnsembl(biomart= "ensembl", dataset="hsapiens_gene_ensembl")
-#listAttributes(human)
-
-#biomaRt::searchFilters(mart = human, pattern = "ensembl")
-genes_of_interest=getBM(attributes=c("hgnc_symbol","ensembl_gene_id","ensembl_gene_id_version","ensembl_transcript_id_version", "transcript_length", "transcript_is_canonical"), filters="ensembl_gene_id", values=ensembl_list, mart=human)
 #dim(genes_of_interest)
 #head(genes_of_interest)
 summary(genes_of_interest$transcript_length)
 
 #filtro los canonical
 genes_of_interest_filt<- filter(genes_of_interest, transcript_is_canonical == 1)
+#miro si hay duplicados
+table(duplicated(genes_of_interest_filt$ensembl_gene_id))
+#mantengo los no duplicados
+genes_of_interest_filt<-genes_of_interest_filt[!duplicated(genes_of_interest_filt$ensembl_gene_id),]
 
 dim(genes_of_interest_filt)
 #head(genes_of_interest_filt)
@@ -190,13 +211,16 @@ hash_table_Filt$JuanjoRownames<- rownames(hash_table_Filt)
 
 ```{r MERGE, echo=FALSE}
 #uno las tablas hash_table_filt y genes_of_interest_filt
-a<-merge(hash_table_Filt, genes_of_interest_filt, by= "ensembl_gene_id", all.x= TRUE)
+a<-merge(hash_table_Filt, genes_of_interest_filt, by= "ensembl_gene_id", all= FALSE)
+
 #identical(a[['hgnc.symbol.x']],a[['hgnc.symbol.y']])
 #colnames(a)
 rownames(a)<- a$JuanjoRownames
-a<-a[,-c(19,20,24)]
-a<-a[,c(1:6,19:21,7:18)]
-names(a)[2]<- "hgnc_symbol"      
+#a<-a[,-c(19,20,24)]
+
+a<-a[,c(1:6,37:41,7:36)]
+names(a)[2]<- "hgnc_symbol"
+a<-a[,-c(7)]
 #colnames(a)
 hash_table_Filt<-a
 rm(a)
@@ -204,14 +228,9 @@ rm(a)
 hash_table_Filt$entrezgene_id<- as.character(hash_table_Filt$entrezgene_id) 
 #la dataframe con las longitudes de los transcritos queda así:
 summary(hash_table_Filt)
-```
 
-```{r echo=FALSE}
-#queda un gen con NAs. Por eso aparece un warning, es el siguiente:
 hash_table_Filt[is.na(hash_table_Filt$transcript_length),]
-#lo quito
-hash_table_Filt<- hash_table_Filt[which(!is.na(hash_table_Filt$transcript_length)),]
-dim(hash_table_Filt)
+
 ```
 
 
@@ -261,12 +280,12 @@ scatter_plot <- function(data, x, y, title, ribosomico, grupo) {
 }
 mis_plots<- list()
 
-muestras<- colnames(hash_table_Filt[c(10:21)])
+muestras<- colnames(hash_table_Filt[c(11:39)])
 
 for (i in muestras) {
-  fila<-which(metaDataOrg1$name == i)
-  ribosomico<-as.numeric(metaDataOrg1[fila,5])
-  grupo<-metaDataOrg1[fila,4]
+  fila<-which(metaDataOrg2$name == i)
+  ribosomico<-as.numeric(metaDataOrg2[fila,5])
+  grupo<-metaDataOrg2[fila,4]
   plot<- scatter_plot(data= hash_table_Filt,
                       x= transcript_length,
                       y= eval(parse(text = i)),
@@ -285,6 +304,16 @@ ggarrange(mis_plots[[5]], mis_plots[[6]], mis_plots[[7]], mis_plots[[8]],
                       ncol = 1, nrow = 4)
 ggarrange(mis_plots[[9]], mis_plots[[10]], mis_plots[[11]], mis_plots[[12]],
                       ncol = 1, nrow = 4)
+ggarrange(mis_plots[[13]], mis_plots[[14]], mis_plots[[15]], mis_plots[[16]],
+                      ncol = 1, nrow = 4)
+ggarrange(mis_plots[[17]], mis_plots[[18]], mis_plots[[19]], mis_plots[[20]],
+                      ncol = 1, nrow = 4)
+ggarrange(mis_plots[[21]], mis_plots[[22]], mis_plots[[23]], mis_plots[[24]],
+                      ncol = 1, nrow = 4)
+ggarrange(mis_plots[[25]], mis_plots[[26]], mis_plots[[27]], mis_plots[[28]],
+                      ncol = 1, nrow = 4)
+ggarrange(mis_plots[[29]],ncol = 1, nrow = 4)
+
 rm(mis_plots)
 ```
 
@@ -295,7 +324,7 @@ rm(mis_plots)
 
 ```{r echo=FALSE}
 library(reshape2)
-datos<- hash_table_Filt[, 9:21]
+datos<- hash_table_Filt[, c(9,11:39)]
 datos$transcript<- rownames(datos)
 head(datos)
 #datos=t(datos)
@@ -307,7 +336,7 @@ summary(datos)
 datos<-melt(datos, measure.vars = c(muestras))
 datos$value<-log2(datos$value+1)
 names(datos)[5]<- "log2counts"
-datos$ribosomicos<-metaDataOrg1[match(datos$variable,metaDataOrg1$name),5]
+datos$ribosomicos<-metaDataOrg2[match(datos$variable,metaDataOrg2$name),5]
 datos$ribosomicos<- ifelse(datos$ribosomicos == 0, "18s", "18s28s")
 table(datos$variable, datos$ribosomicos)
 
@@ -371,24 +400,43 @@ rm(datos)
 **Los números, sin embargo, son muy similares.**
 
 ```{r echo=FALSE}
-numero<-table(hash_table_Filt$T07A>10)[2]
-numero<- c(numero,table(hash_table_Filt$T09A>10)[2])
-numero<- c(numero,table(hash_table_Filt$T13A>10)[2])
-numero<- c(numero,table(hash_table_Filt$T18A>10)[2])
-numero<- c(numero,table(hash_table_Filt$T29T>10)[2])
-numero<- c(numero,table(hash_table_Filt$T34T>10)[2])
-numero<- c(numero,table(hash_table_Filt$T43A>10)[2])
-numero<- c(numero,table(hash_table_Filt$T44T>10)[2])
-numero<- c(numero,table(hash_table_Filt$T45A>10)[2])
-numero<- c(numero,table(hash_table_Filt$T46T>10)[2])
-numero<- c(numero,table(hash_table_Filt$T47A>10)[2])
-numero<- c(numero,table(hash_table_Filt$T48T>10)[2])
+numero<-table(hash_table_Filt$T02B>10)[2]
+numero<- c(numero,table(hash_table_Filt$T04A>10)[2])
+numero<- c(numero,table(hash_table_Filt$T08A>10)[2])
+numero<- c(numero,table(hash_table_Filt$T11A >10)[2])
+numero<- c(numero,table(hash_table_Filt$T12C>10)[2])
+numero<- c(numero,table(hash_table_Filt$T14B>10)[2])
+numero<- c(numero,table(hash_table_Filt$T19A>10)[2])
+numero<- c(numero,table(hash_table_Filt$T20T>10)[2])
+numero<- c(numero,table(hash_table_Filt$T22T>10)[2])
+numero<- c(numero,table(hash_table_Filt$T23T>10)[2])
+numero<- c(numero,table(hash_table_Filt$T25T>10)[2])
+numero<- c(numero,table(hash_table_Filt$T27T>10)[2])
+numero<- c(numero,table(hash_table_Filt$T30T>10)[2])
+numero<- c(numero,table(hash_table_Filt$T31T>10)[2])
+numero<- c(numero,table(hash_table_Filt$T32T>10)[2])
+numero<- c(numero,table(hash_table_Filt$T35T>10)[2])
+numero<- c(numero,table(hash_table_Filt$T36T>10)[2])
+numero<- c(numero,table(hash_table_Filt$T50T>10)[2])
+numero<- c(numero,table(hash_table_Filt$T51A>10)[2])
+numero<- c(numero,table(hash_table_Filt$T52T>10)[2])
+numero<- c(numero,table(hash_table_Filt$T58T>10)[2])
+numero<- c(numero,table(hash_table_Filt$T59A>10)[2])
+numero<- c(numero,table(hash_table_Filt$T60T>10)[2])
+numero<- c(numero,table(hash_table_Filt$T63T>10)[2])
+numero<- c(numero,table(hash_table_Filt$T64T>10)[2])
+numero<- c(numero,table(hash_table_Filt$T65T>10)[2])
+numero<- c(numero,table(hash_table_Filt$T66T>10)[2])
+numero<- c(numero,table(hash_table_Filt$T67T>10)[2])
+numero<- c(numero,table(hash_table_Filt$T71T>10)[2])
 
-NumGenes<- data.frame(suma= colSums(hash_table_Filt[10:21]))
+
+
+NumGenes<- data.frame(suma= colSums(hash_table_Filt[11:39]))
 NumGenes$num_10<-numero
 NumGenes$muestra<- rownames(NumGenes)
-NumGenes$type<- metaDataOrg1$type
-NumGenes$ribo<- metaDataOrg1$ribosomicos
+NumGenes$type<- metaDataOrg2$type
+NumGenes$ribo<- metaDataOrg2$ribosomicos
 NumGenes$type<- factor(NumGenes$type, labels=c("Organoide", "Biopsia"))
 NumGenes$ribo<- factor(NumGenes$ribo, labels= c("18s","18s28s"))
 NumGenes$combiTipoRibo<- paste0(NumGenes$type,"_", NumGenes$ribo)
@@ -433,14 +481,14 @@ ggplot(data=NumGenes, aes(x= combiTipoRibo, y= num_10 , color= combiTipoRibo))+
 **Siguiendo la siguiente viñeta:**
 https://bioconductor.org/packages/release/workflows/vignettes/rnaseqGene/inst/doc/rnaseqGene.html
 
-**Comprobar que los nombres de las columnas de `countDataOrg1` coinciden con los de las filas de `metaDataOrg1`:**
+**Comprobar que los nombres de las columnas de `countDataOrg2` coinciden con los de las filas de `metaDataOrg2`:**
 
 
 ```{r COMPROBACION}
-all.equal(colnames(countDataOrg1), rownames(metaDataOrg1))
+all.equal(colnames(countDataOrg2), rownames(metaDataOrg2))
 # no coinciden, los rownames están vacíos.
-rownames(metaDataOrg1)<- metaDataOrg1$name
-all.equal(colnames(countDataOrg1), rownames(metaDataOrg1))
+rownames(metaDataOrg2)<- metaDataOrg2$name
+all.equal(colnames(countDataOrg2), rownames(metaDataOrg2))
 #  ahora sí
 ```
 
@@ -449,10 +497,10 @@ all.equal(colnames(countDataOrg1), rownames(metaDataOrg1))
               **~ribosomicos+type+Metaplasia**
 
 ```{r OBJETO_DESEQ}
-#metaDataOrg1<-metaDataOrg1[,c(2,3,5)]
+#metaDataOrg2<-metaDataOrg2[,c(2,3,5)]
 
-dseq_org1<- DESeqDataSetFromMatrix(countData = round(hash_table_Filt[,10:21]), 
-                                   colData = metaDataOrg1,
+dseq_org1<- DESeqDataSetFromMatrix(countData = round(hash_table_Filt[,11:39]), 
+                                   colData = metaDataOrg2,
                                    design=~ribosomicos+type+Metaplasia)
 dim(dseq_org1)
 ```
@@ -501,10 +549,10 @@ par(mar = c(10, 3, 3, 4) + 0.1,
 
 plot(as.dendrogram(h))
 # Setup the color bar based on $am & $vs
-the_bars_type <- ifelse(as.numeric(as.character(metaDataOrg1$type)),"red", "green")
-#the_bars_meta <- ifelse(as.numeric(as.character(metaDataOrg1$Metaplasia)), "yellow", "blue")
-the_bars_ribo <- ifelse(as.numeric(as.character(metaDataOrg1$ribosomicos)), "yellow", "blue")
-
+the_bars_type <- ifelse(as.numeric(as.character(metaDataOrg2$type)),"red", "green")
+#the_bars_meta <- ifelse(as.numeric(as.character(metaDataOrg2$Metaplasia)), "yellow", "blue")
+the_bars_ribo <- ifelse(tt<- as.numeric(as.character(metaDataOrg2$ribosomicos)), "yellow", "blue")
+tt
 the_bars <- cbind(the_bars_ribo, the_bars_type  )#, the_bars_meta)
 colored_bars(colors = the_bars, dend = as.dendrogram(h),  rowLabels = c("ribos", "type"))
 # Add the legend manually
